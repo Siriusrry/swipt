@@ -67,9 +67,12 @@ func (c *RemoteClient) ReadScreen(ctx context.Context, springboard uint64, overl
 		if system.Code != 0 {
 			return nil, ErrNoApplication
 		}
-		app := front.Value
+		resolved, err := c.resolveFrontmost(ctx, front.Value)
+		if err != nil {
+			return nil, err
+		}
+		app := resolved.element
 		second := &Batch{}
-		bundle := second.BundleID(app)
 		full := second.Snapshot(app, SnapshotOptions{})
 		modal := second.Snapshot(app, SnapshotOptions{Attributes: []int64{nativeClassName}, HonorModal: true})
 		focused := second.Focused(app)
@@ -80,16 +83,13 @@ func (c *RemoteClient) ReadScreen(ctx context.Context, springboard uint64, overl
 		if err := run(second); err != nil {
 			return nil, err
 		}
-		if err := bundle.Err("read the frontmost application's bundle ID"); err != nil {
-			return nil, c.silent(ctx, app, false, err)
-		}
 		if err := full.Err("snapshot the frontmost application"); err != nil {
 			return nil, c.silent(ctx, app, false, err)
 		}
 		if err := modal.Err("snapshot the frontmost application's modal view"); err != nil {
 			return nil, err
 		}
-		screen := &Screen{BundleID: bundle.Value, App: app, Root: full.Value.Root}
+		screen := &Screen{BundleID: resolved.bundle, App: app, Root: full.Value.Root}
 		if focused.Code == 0 {
 			ref := focused.Value.Ref
 			screen.Focused = &ref
@@ -103,7 +103,7 @@ func (c *RemoteClient) ReadScreen(ctx context.Context, springboard uint64, overl
 			screen.System = systemSnapshot.Value.Root
 			snapshots = append(snapshots, systemSnapshot.Value)
 		}
-		err := c.expand(run, snapshots, springboard)
+		err = c.expand(run, snapshots, springboard)
 		screen.Rounds = rounds
 		return screen, err
 	})
@@ -163,14 +163,24 @@ func (c *RemoteClient) ReadApplication(ctx context.Context, options ApplicationO
 			return nil, err
 		}
 		var bundle *Result[string]
-		if options.Wanted != nil {
-			check := &Batch{}
-			bundle = check.BundleID(app.Value)
-			if err := c.Run(ctx, check); err != nil {
+		if options.PID == 0 {
+			resolved, err := c.resolveFrontmost(ctx, app.Value)
+			if err != nil {
 				return nil, err
 			}
-			if err := bundle.Err("read the application's bundle ID"); err != nil {
-				return nil, c.silent(ctx, app.Value, options.PID != 0, err)
+			app.Value = resolved.element
+			bundle = &Result[string]{Value: resolved.bundle}
+		}
+		if options.Wanted != nil {
+			if bundle == nil {
+				check := &Batch{}
+				bundle = check.BundleID(app.Value)
+				if err := c.Run(ctx, check); err != nil {
+					return nil, err
+				}
+				if err := bundle.Err("read the application's bundle ID"); err != nil {
+					return nil, c.silent(ctx, app.Value, options.PID != 0, err)
+				}
 			}
 			if !options.Wanted(bundle.Value) {
 				return &Screen{BundleID: bundle.Value, App: app.Value}, nil
