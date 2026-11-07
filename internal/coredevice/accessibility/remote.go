@@ -87,6 +87,7 @@ const (
 )
 
 type RemoteClient struct {
+	device                  *coredevice.Device
 	conn                    *dtx.Conn
 	ctx                     context.Context
 	owner                   context.Context
@@ -130,7 +131,8 @@ func DialRemote(ctx, owner context.Context, device *coredevice.Device, pushed fu
 	}
 	operation, cancel := context.WithCancelCause(ctx)
 	c := &RemoteClient{
-		conn: dtxConn, ctx: operation, owner: owner, cancel: cancel,
+		device: device,
+		conn:   dtxConn, ctx: operation, owner: owner, cancel: cancel,
 		deviceClass:          device.Info().DeviceClass,
 		screenViewingPending: make(chan struct{}, 1),
 		pushed:               pushed,

@@ -2,6 +2,7 @@ package instruments
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -141,6 +142,42 @@ func (d *DeviceInfo) Foreground(ctx context.Context, pid uint64) (bool, error) {
 	fields, _ := value.(map[string]any)
 	running, _ := fields["foregroundRunning"].(bool)
 	return running, nil
+}
+
+// ForegroundApplications also works before application-state notifications have
+// populated the caller's process cache. InputUI and other system helpers can
+// report foregroundRunning too, so only include the supplied application IDs.
+func (d *DeviceInfo) ForegroundApplications(ctx context.Context, bundleIDs []string) ([]uint64, error) {
+	value, err := d.conn.Invoke(ctx, deviceInfoChannel, "runningProcesses")
+	if err != nil {
+		return nil, E.Cause(err, "instruments: list foreground processes")
+	}
+	processes, ok := value.([]any)
+	if !ok {
+		return nil, E.New("instruments: unexpected runningProcesses response")
+	}
+	var result []uint64
+	for _, process := range processes {
+		fields, _ := process.(map[string]any)
+		foreground, _ := fields["foregroundRunning"].(bool)
+		bundleID, _ := fields["bundleIdentifier"].(string)
+		if !foreground || !slices.Contains(bundleIDs, bundleID) {
+			continue
+		}
+		var pid uint64
+		switch value := fields["pid"].(type) {
+		case uint64:
+			pid = value
+		case int64:
+			if value > 0 {
+				pid = uint64(value)
+			}
+		}
+		if pid != 0 {
+			result = append(result, pid)
+		}
+	}
+	return result, nil
 }
 
 func (d *DeviceInfo) Err() error {

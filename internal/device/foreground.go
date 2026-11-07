@@ -19,11 +19,12 @@ import (
 // suspended, and the frontmost application turned to a cold-launched app 70 to
 // 550 ms after its process was reported (iPhone18,2, iOS 27.2 24B115).
 const (
-	appStatesBacklog = 250 * time.Millisecond
-	recentFront      = 250 * time.Millisecond
-	frontBurst       = 1200 * time.Millisecond
-	trackingLinger   = 10 * time.Second
-	frontProbe       = 3 * time.Second
+	sleepLockScreenBundleID = "com.apple.SleepLockScreen"
+	appStatesBacklog        = 250 * time.Millisecond
+	recentFront             = 250 * time.Millisecond
+	frontBurst              = 1200 * time.Millisecond
+	trackingLinger          = 10 * time.Second
+	frontProbe              = 3 * time.Second
 )
 
 // AXP notification 3, which the translator forwards at once for a change of
@@ -85,7 +86,7 @@ func (f *foreground) get(ctx context.Context) (frontApplication, error) {
 	f.access.Lock()
 	current, tracked := f.current, f.tracked
 	f.access.Unlock()
-	if tracked && current.bundleID != "" || time.Since(current.at) < recentFront {
+	if current.bundleID != sleepLockScreenBundleID && (tracked && current.bundleID != "" || time.Since(current.at) < recentFront) {
 		return current, nil
 	}
 	return f.read(ctx)
@@ -94,27 +95,11 @@ func (f *foreground) get(ctx context.Context) (frontApplication, error) {
 func (f *foreground) read(ctx context.Context) (frontApplication, error) {
 	value, err := f.conn.ax.readLow(ctx, "frontmost", func(ctx context.Context, client *accessibility.RemoteClient) (any, error) {
 		seen := time.Now()
-		batch := &accessibility.Batch{}
-		front := batch.Frontmost()
-		if err := client.Run(ctx, batch); err != nil {
+		front, bundleID, err := client.Frontmost(ctx)
+		if err != nil {
 			return nil, err
 		}
-		if err := front.Err("read the frontmost application"); err != nil {
-			return nil, err
-		}
-		bundleID := f.bundleOf(front.Value.Ref.PID)
-		if bundleID == "" {
-			read := &accessibility.Batch{}
-			bundle := read.BundleID(front.Value)
-			if err := client.Run(ctx, read); err != nil {
-				return nil, err
-			}
-			if err := bundle.Err("read the frontmost application's bundle ID"); err != nil {
-				return nil, err
-			}
-			bundleID = bundle.Value
-		}
-		return frontApplication{pid: front.Value.Ref.PID, bundleID: bundleID, at: seen, via: "frontmost"}, nil
+		return frontApplication{pid: front.Ref.PID, bundleID: bundleID, at: seen, via: "frontmost"}, nil
 	})
 	if err != nil {
 		return frontApplication{}, err
@@ -137,6 +122,11 @@ func (f *foreground) read(ctx context.Context) (frontApplication, error) {
 // running the previous app in front for at least 700 ms of that (iPhone18,2,
 // iOS 27.2 24B119).
 func (f *foreground) contradicted(ctx context.Context, front frontApplication) bool {
+	// The shared AX resolver already checked the live lock state before trying
+	// to replace SleepLockScreen. Do not override a real lock with a cached app.
+	if front.bundleID == sleepLockScreenBundleID {
+		return false
+	}
 	f.access.Lock()
 	current := f.current
 	f.access.Unlock()
@@ -490,7 +480,7 @@ func (f *foreground) track(ctx context.Context, stopped chan struct{}) {
 
 func (f *foreground) confirm(ctx context.Context, pushed uint64) {
 	if pushed != 0 {
-		if bundleID := f.bundleOf(pushed); bundleID != "" && bundleID != springboardBundleID {
+		if bundleID := f.bundleOf(pushed); bundleID != "" && bundleID != springboardBundleID && bundleID != sleepLockScreenBundleID {
 			front := frontApplication{pid: pushed, bundleID: bundleID, at: time.Now(), via: "push"}
 			if !f.contradicted(ctx, front) {
 				f.saw(front)
